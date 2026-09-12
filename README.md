@@ -1,88 +1,65 @@
-# Student Enrollment Data Cleaner (n8n Workflow)
+Student Enrollment ETL Pipeline (n8n)
 
-An n8n automation that takes messy student enrollment rows, cleans them using an AI node, and standardizes the output into a consistent, rule-validated JSON format — ready for reporting, storage, or downstream use.
+CAIE Course — Assignment 7: AI Automation ETL Pipeline Challenge
 
-## What it does
+An n8n workflow that extracts raw, messy student enrollment data from CSV, cleans it using AI, validates it with rule-based logic, and routes each record into one of four output files based on two filtering conditions.
 
-Raw enrollment data is often inconsistent — mixed casing, invalid emails, incomplete phone numbers, non-standard course names, and inconsistent date formats. This workflow fixes all of that automatically, applying a fixed set of business rules to every row.
+Problem
 
-**Input** (raw, messy):
-```json
-{
-  "Student_ID": "STU1001",
-  "Name": "manoj k",
-  "Email": "manojk@gmail",
-  "Phone": "9876543210",
-  "Course": "python",
-  "Fee_Paid": "yes",
-  "City": "Chennai",
-  "Enrolled_Date": "23-05-2025"
-}
-```
+Social Eagle AI Academy receives weekly student enrollment data via Google Forms. The raw data is inconsistent — mixed casing, invalid emails, missing phone digits, inconsistent date formats. This pipeline automates cleaning and sorting it into ready-to-use files.
 
-**Output** (cleaned, standardized):
-```json
-{
-  "Student_ID": "STU1001",
-  "Name": "Manoj K",
-  "Email": "INVALID_EMAIL",
-  "Phone": "9876543210",
-  "Course": "Python",
-  "Fee_Paid": true,
-  "City": "Chennai",
-  "Enrolled_Date": "2025-05-23",
-  "Email_Valid": false
-}
-```
-
-## Cleaning Rules Applied
-
-| Field | Rule |
-|---|---|
-| `Name` | Converted to Title Case |
-| `Email` | If invalid format, replaced with `INVALID_EMAIL`; `Email_Valid` flag set accordingly |
-| `Phone` | If fewer than 10 digits after stripping non-numeric characters, set to `MISSING` |
-| `Course` | Must be one of: `Python`, `Machine Learning`, `Data Science`; anything else becomes `INVALID_COURSE` |
-| `Fee_Paid` | Normalized from `yes/YES/true` variants into a proper boolean |
-| `City` | Converted to Title Case; empty values become `UNKNOWN` |
-| `Enrolled_Date` | Converted from `DD-MM-YYYY` to `YYYY-MM-DD` |
-| `Email_Valid` | Computed via regex — independent, reliable check (not left to AI judgment) |
-
-## Workflow Structure
-
-```
-[Extract from File]  →  [AI Node (cleaning prompt)]  →  [Code Node (parse + validate)]
-      50 raw rows          LLM cleans each row              Final structured JSON
-```
-
-1. **Extract from File** — loads the raw enrollment dataset (50 student rows)
-2. **AI Node** — runs each row through an LLM with a strict cleaning prompt (see below), returning cleaned data as a JSON string
-3. **Code Node** — parses the AI's string output into real JSON and recalculates `Email_Valid` deterministically using regex (AI output isn't trusted for this — rule-based checks are more reliable than relying on model judgment)
-
-## The AI Prompt Used
-
-```
+Pipeline Overview
+CSV Upload → Switch → Extract from File → Basic LLM Chain → Loop Over Items
+                                             (OpenAI Chat Model)      ↓
+                                                            Code in JavaScript
+                                                                      ↓
+                                                          Loop Over Items (until done)
+                                                                      ↓
+                                                        If — City = Chennai?
+                                          ┌───────────true───────────┴───────────false──────────┐
+                                          ↓                                                       ↓
+                                  If1 — Email valid?                                    If2 — Email valid?
+                              ┌─────true────┴────false────┐                      ┌─────true────┴────false────┐
+                              ↓                            ↓                      ↓                            ↓
+                    chennai_valid_email          chennai_invalid_email    other_valid_email          other_invalid_email
+Output Files
+File	Condition
+chennai_valid_email	City = Chennai AND Email valid
+chennai_invalid_email	City = Chennai AND Email invalid
+other_valid_email	City = Other AND Email valid
+other_invalid_email	City = Other AND Email invalid
+Nodes Used
+Node	Purpose
+CSV Upload	Trigger — starts the workflow when a file is uploaded
+Switch	Routes the uploaded file
+Extract from File	Reads the CSV into 50 structured rows
+Basic LLM Chain + OpenAI Chat Model	AI cleans each row per the prompt rules below
+Loop Over Items	Processes rows one at a time through the Code node until all 50 are done
+Code in JavaScript	Parses the AI's raw text output into real JSON, applies deterministic validation (especially Email_Valid)
+If	Splits rows by City = Chennai
+If1	Splits Chennai rows by Email_Valid
+If2	Splits Other-city rows by Email_Valid
+Convert to File (×4)	Exports each of the 4 final branches as a separate file
+AI Cleaning Prompt (Basic LLM Chain)
 Clean this student enrollment row and return ONLY a JSON object.
 
 Row data: {{ JSON.stringify($json) }}
 
 Rules:
-- Name: Title Case (Manoj K)
-- Email: if invalid set INVALID_EMAIL
-- Phone: if less than 10 digits set MISSING
+- Name: Title Case
+- Email: if invalid (no @ or no .com/.in) set INVALID_EMAIL
+- Phone: if less than 10 digits or empty set MISSING
 - Course: only Python or Machine Learning or Data Science
 - Fee_Paid: yes/YES = true, no/NO = false
 - City: Title Case, empty = UNKNOWN
-- Enrolled_Date: convert to YYYY-MM-DD
+- Enrolled_Date: YYYY-MM-DD format
 
 Return ONLY raw JSON. No explanation. No markdown.
-```
+Code Node Logic
 
-## The Code Node Logic
+The AI node's response arrives as item.json.text — a string containing JSON, not a parsed object. This must be parsed before any transformation logic runs.
 
-Key implementation detail: the AI node's response arrives wrapped as `item.json.text` — a **string** containing JSON, not an object. The code parses this first before applying any further logic.
-
-```javascript
+javascript
 // Mode: Run Once for All Items
 
 function toTitleCase(str) {
@@ -148,38 +125,45 @@ return $input.all().map(item => {
     }
   };
 });
-```
+Filter Node Conditions
 
-## Key Design Decisions
+If (City filter):
 
-- **Email validity is computed in code, not trusted from the AI.** LLM judgment on formatting rules can vary row to row; a regex check is 100% consistent across all records.
-- **Errors don't crash the whole batch.** If one row's AI output fails to parse, it's flagged with `parse_error: true` and the rest of the 50 rows still process normally.
-- **AI handles the fuzzy part (interpreting messy real-world text), code handles the strict part (validation, formatting).** This hybrid is more reliable than asking the AI to do everything itself.
+{{ $('Code in JavaScript').item.json.City }}  is equal to  Chennai
 
-## Debugging Note
+If1 and If2 (Email filter — identical condition, different branch position):
 
-If Code node output doesn't match expectations, the fastest fix is always to inspect the raw data shape before changing logic:
+{{ $('Code in JavaScript').item.json.Email_Valid }}  is equal to  true
 
-```javascript
+(Comparison type: Boolean)
+
+Key Design Decisions
+Email_Valid is computed in code via regex, not trusted from the AI. Rule-based validation is 100% consistent across all 50 rows; LLM judgment on formatting can vary row to row.
+Errors don't crash the whole batch. If one row's AI output fails to parse, it's flagged with parse_error: true while the rest continue processing normally.
+AI handles the fuzzy part (interpreting messy real-world text formatting), code handles the strict part (validation, boolean logic, date/phone format enforcement). This hybrid is more reliable than asking the AI to do everything end-to-end.
+Debugging Note
+
+If a Code node's output doesn't match expectations, inspect the raw data shape before changing logic — don't assume it:
+
+javascript
 // Temporary debug — reveals the exact incoming data structure
 return [{ json: $input.all()[0] }];
-```
 
-This surfaces any unexpected nesting (e.g., data wrapped inside `.text`, `.output`, or similar fields) before you write parsing logic around assumptions.
+This is how the item.json.text nesting (a common trap with AI/LLM node outputs in n8n) was discovered during development.
 
-## Requirements
+Bonus Output (Optional)
 
-- n8n (self-hosted or cloud)
-- An AI/LLM node (OpenAI, Claude, or similar) connected with a valid API key
-- Input dataset of student enrollment records (JSON or file source)
+A 5th output — chennai_paid_confirmed — can be added by branching off the Chennai + Valid Email path with one more IF node checking Fee_Paid is true.
 
-## Setup
+Requirements
+n8n (self-hosted; this project runs on a Hostinger VPS instance)
+OpenAI API key (or equivalent LLM provider) connected to the Basic LLM Chain node
+student_enrollment_raw.csv — 50 rows of raw student enrollment data
+Setup
+Import the workflow JSON into your n8n instance
+Connect your OpenAI (or other LLM) credentials to the Chat Model node
+Upload student_enrollment_raw.csv via the CSV Upload trigger
+Click Execute Workflow
+Check the 4 output files for correct routing
 
-1. Import the workflow JSON into your n8n instance
-2. Connect your AI node credentials (API key)
-3. Point the "Extract from File" node to your dataset
-4. Execute the workflow
-
----
-
-Built while learning n8n automation and AI-assisted data pipelines as part of the Social Eagle AI course.
+Built as part of the Social Eagle CAIE Course Program — AI Automation track.
